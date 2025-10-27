@@ -14,6 +14,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import time
 import os
 import sys
+import socket
 
 
 class TestCannacraftWebsite:
@@ -32,31 +33,39 @@ class TestCannacraftWebsite:
         driver = webdriver.Chrome(options=chrome_options)
         driver.implicitly_wait(10)
         
-        # Find the HTML file
-        possible_paths = [
-            "index.html",
-            "website.html",
-            "../index.html",
-            os.path.join(os.path.dirname(__file__), "index.html")
-        ]
+        # Check if HTTP server is running (CI environment)
+        if self.is_port_open('localhost', 8080):
+            url = "http://localhost:8080/index.html"
+            print(f"\n✅ Using HTTP server: {url}")
+        else:
+            # Fallback to file:// protocol for local testing
+            possible_paths = [
+                "index.html",
+                "website.html",
+                "../index.html",
+                os.path.join(os.path.dirname(__file__), "index.html")
+            ]
+            
+            file_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    file_path = os.path.abspath(path)
+                    break
+            
+            if not file_path:
+                pytest.skip("index.html not found. Please ensure the HTML file is in the repository root.")
+            
+            url = f"file://{file_path}"
+            print(f"\n✅ Using local file: {url}")
         
-        file_path = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                file_path = os.path.abspath(path)
-                break
-        
-        if not file_path:
-            pytest.skip("index.html not found. Please ensure the HTML file is in the repository root.")
-        
-        print(f"\n✅ Loading file from: {file_path}")
-        driver.get(f"file://{file_path}")
+        driver.get(url)
         
         # Wait for page to load
         try:
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "logo"))
             )
+            print(f"✅ Page loaded successfully from: {url}")
         except TimeoutException:
             print("❌ Page failed to load within timeout")
             driver.quit()
@@ -64,6 +73,14 @@ class TestCannacraftWebsite:
         
         yield driver
         driver.quit()
+    
+    def is_port_open(self, host, port):
+        """Check if a port is open"""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
     
     def wait_for_element(self, driver, by, value, timeout=10):
         """Helper method to wait for element"""
