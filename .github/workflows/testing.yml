@@ -1,0 +1,122 @@
+name: Selenium Test Suite
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        python-version: [3.9, 3.10.0, 3.11]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install selenium pytest pytest-html pytest-cov
+        pip install webdriver-manager
+    
+    - name: Install Chrome
+      uses: browser-actions/setup-chrome@latest
+      with:
+        chrome-version: stable
+    
+    - name: Install ChromeDriver
+      run: |
+        CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
+        wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE" -O chrome_version
+        CHROMEDRIVER_VERSION=$(cat chrome_version)
+        wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip"
+        unzip chromedriver_linux64.zip
+        sudo mv chromedriver /usr/local/bin/
+        sudo chmod +x /usr/local/bin/chromedriver
+        rm chromedriver_linux64.zip chrome_version
+    
+    - name: Display Chrome version
+      run: google-chrome --version
+    
+    - name: Display ChromeDriver version
+      run: chromedriver --version
+    
+    - name: Run Selenium Tests
+      run: |
+        pytest test_cannacraft.py -v --html=report.html --self-contained-html --cov=. --cov-report=xml
+      continue-on-error: false
+    
+    - name: Upload Test Report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-report-python-${{ matrix.python-version }}
+        path: |
+          report.html
+          coverage.xml
+        retention-days: 30
+    
+    - name: Upload Coverage to Codecov
+      if: matrix.python-version == '3.10.0'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+    
+    - name: Test Summary
+      if: always()
+      run: |
+        echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "Python Version: ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ -f report.html ]; then
+          echo "✅ Test report generated successfully" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Test report generation failed" >> $GITHUB_STEP_SUMMARY
+        fi
+    
+    - name: Comment PR with Test Results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          if (fs.existsSync('report.html')) {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Selenium tests passed! Check the artifacts for detailed report.'
+            });
+          }
+  
+  deploy-report:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Download Test Reports
+      uses: actions/download-artifact@v3
+      with:
+        path: reports
+    
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./reports
+        publish_branch: gh-pages
