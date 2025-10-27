@@ -10,16 +10,25 @@ jobs:
     
     strategy:
       matrix:
-        python-version: [3.9, 3.10.0, 3.11]
+        python-version: ['3.9', '3.10', '3.11']
+      fail-fast: false
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
     
     - name: Install dependencies
       run: |
@@ -28,20 +37,32 @@ jobs:
         pip install webdriver-manager
     
     - name: Install Chrome
-      uses: browser-actions/setup-chrome@latest
+      uses: browser-actions/setup-chrome@v1
       with:
         chrome-version: stable
+      id: setup-chrome
     
     - name: Install ChromeDriver
       run: |
-        CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
-        wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE" -O chrome_version
-        CHROMEDRIVER_VERSION=$(cat chrome_version)
-        wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip"
-        unzip chromedriver_linux64.zip
-        sudo mv chromedriver /usr/local/bin/
+        # Get Chrome version
+        CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+')
+        echo "Chrome version: $CHROME_VERSION"
+        
+        # Get matching ChromeDriver version
+        CHROME_MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d. -f1)
+        
+        # Download and install ChromeDriver
+        wget -q "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_MAJOR_VERSION}" -O chromedriver_version.txt
+        CHROMEDRIVER_VERSION=$(cat chromedriver_version.txt)
+        echo "ChromeDriver version: $CHROMEDRIVER_VERSION"
+        
+        wget -q "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip"
+        unzip -q chromedriver-linux64.zip
+        sudo mv chromedriver-linux64/chromedriver /usr/local/bin/
         sudo chmod +x /usr/local/bin/chromedriver
-        rm chromedriver_linux64.zip chrome_version
+        
+        # Cleanup
+        rm -rf chromedriver-linux64 chromedriver-linux64.zip chromedriver_version.txt
     
     - name: Display Chrome version
       run: google-chrome --version
@@ -51,72 +72,164 @@ jobs:
     
     - name: Run Selenium Tests
       run: |
-        pytest test_cannacraft.py -v --html=report.html --self-contained-html --cov=. --cov-report=xml
+        pytest test_cannacraft.py -v --html=report.html --self-contained-html --cov=. --cov-report=xml --cov-report=term
       continue-on-error: false
     
     - name: Upload Test Report
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: test-report-python-${{ matrix.python-version }}
         path: |
           report.html
           coverage.xml
         retention-days: 30
+        if-no-files-found: warn
     
     - name: Upload Coverage to Codecov
-      if: matrix.python-version == '3.10.0'
-      uses: codecov/codecov-action@v3
+      if: matrix.python-version == '3.10'
+      uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
         flags: unittests
         name: codecov-umbrella
         fail_ci_if_error: false
+        token: ${{ secrets.CODECOV_TOKEN }}
     
     - name: Test Summary
       if: always()
       run: |
-        echo "## Test Results" >> $GITHUB_STEP_SUMMARY
-        echo "Python Version: ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
+        echo "## Test Results 🧪" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Python Version:** ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Chrome Version:** $(google-chrome --version)" >> $GITHUB_STEP_SUMMARY
+        echo "**ChromeDriver Version:** $(chromedriver --version)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         if [ -f report.html ]; then
           echo "✅ Test report generated successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📊 Download the artifact to view the full HTML report" >> $GITHUB_STEP_SUMMARY
         else
           echo "❌ Test report generation failed" >> $GITHUB_STEP_SUMMARY
         fi
     
     - name: Comment PR with Test Results
-      if: github.event_name == 'pull_request'
-      uses: actions/github-script@v6
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v7
       with:
         script: |
           const fs = require('fs');
+          let message = '## 🧪 Test Results\n\n';
+          message += `**Python Version:** ${{ matrix.python-version }}\n\n`;
+          
           if (fs.existsSync('report.html')) {
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '✅ Selenium tests passed! Check the artifacts for detailed report.'
-            });
+            message += '✅ Selenium tests completed! Check the artifacts for detailed report.\n\n';
+            message += '📊 [View Artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})';
+          } else {
+            message += '❌ Test execution failed. Please check the workflow logs.';
           }
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });
   
   deploy-report:
     needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     
     - name: Download Test Reports
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: reports
+        pattern: test-report-*
+        merge-multiple: true
+    
+    - name: Create index page
+      run: |
+        mkdir -p reports
+        cat > reports/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Test Reports - Cannacraft</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              max-width: 1200px;
+              margin: 50px auto;
+              padding: 20px;
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            }
+            .container {
+              background: white;
+              padding: 40px;
+              border-radius: 15px;
+              box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            }
+            h1 { color: #667eea; }
+            .report-list { list-style: none; padding: 0; }
+            .report-list li {
+              padding: 15px;
+              margin: 10px 0;
+              background: #f5f5f5;
+              border-radius: 8px;
+              transition: all 0.3s;
+            }
+            .report-list li:hover {
+              background: #667eea;
+              transform: translateX(10px);
+            }
+            .report-list a {
+              text-decoration: none;
+              color: #333;
+              font-size: 18px;
+            }
+            .report-list li:hover a { color: white; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>🧪 Cannacraft Test Reports</h1>
+            <p>Latest test results from GitHub Actions</p>
+            <ul class="report-list">
+              <li><a href="report.html">📊 Latest Test Report</a></li>
+            </ul>
+            <p style="color: #666; margin-top: 30px;">
+              <small>Last updated: $(date)</small>
+            </p>
+          </div>
+        </body>
+        </html>
+        EOF
     
     - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
+      uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: ./reports
         publish_branch: gh-pages
+        force_orphan: true
+  
+  notify:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Send notification
+      run: |
+        if [ "${{ needs.test.result }}" == "success" ]; then
+          echo "✅ All tests passed successfully!"
+        else
+          echo "❌ Some tests failed. Please check the logs."
+        fi
